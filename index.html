@@ -507,6 +507,64 @@ function to12hr(time24) {
   const h12   = h % 12 || 12;
   return `${h12}:${String(m).padStart(2,"0")} ${ampm}`;
 }
+
+// Converts ANY timestamp Google Sheets might return into a clean readable format
+// Handles: ISO strings, serial numbers (1899-12-30 base), plain time strings, date strings
+function fmtTime(raw) {
+  if (!raw || raw === "" || raw === "Active") return raw || "Active";
+  const s = String(raw).trim();
+  // Already looks like a clean time string e.g. "10:02:35 AM" or "10:02 AM"
+  if (/^\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM)$/i.test(s)) return s;
+  // 24-hr time string e.g. "10:02:35" or "10:02"
+  if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(s)) return to12hr(s.substring(0,5));
+  // ISO string e.g. "1899-12-30T17:01:43.000Z" or "2026-07-01T04:00:00.000Z"
+  if (s.includes("T")) {
+    try {
+      const d = new Date(s);
+      if (!isNaN(d)) {
+        return d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",second:"2-digit",hour12:true,timeZone:"America/Toronto"});
+      }
+    } catch(e) {}
+  }
+  return s; // fallback — return as-is
+}
+
+function fmtDate(raw) {
+  if (!raw || raw === "") return "";
+  const s = String(raw).trim();
+  // Already clean date e.g. "2026-07-01"
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [y,m,d] = s.split("-").map(Number);
+    const dt = new Date(y, m-1, d);
+    return dt.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
+  }
+  // ISO string — extract date portion in ET
+  if (s.includes("T")) {
+    try {
+      const d = new Date(s);
+      if (!isNaN(d)) {
+        return d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric",timeZone:"America/Toronto"});
+      }
+    } catch(e) {}
+  }
+  return s;
+}
+
+function fmtDateShort(raw) {
+  if (!raw || raw === "") return "";
+  const s = String(raw).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s; // already clean YYYY-MM-DD
+  if (s.includes("T")) {
+    try {
+      const d = new Date(s);
+      if (!isNaN(d)) {
+        // Return YYYY-MM-DD in ET for getDayType / getWeekNum compatibility
+        return d.toLocaleDateString("en-CA",{timeZone:"America/Toronto"});
+      }
+    } catch(e) {}
+  }
+  return s;
+}
 function updateDayInfo(inputId, infoId) {
   const ds=document.getElementById(inputId).value;
   const el=document.getElementById(infoId);
@@ -773,7 +831,11 @@ async function loadHistory() {
   const rows=res.data;
   if (!rows.length){el.innerHTML='<div class="empty-state">No records yet.</div>';return;}
   const byDay={};
-  rows.forEach(r=>{if(!byDay[r.Date])byDay[r.Date]=[];byDay[r.Date].push(r);});
+  rows.forEach(r=>{
+    const cleanDate = fmtDateShort(r.Date);
+    if(!byDay[cleanDate])byDay[cleanDate]=[];
+    byDay[cleanDate].push(r);
+  });
   el.innerHTML=Object.entries(byDay).sort((a,b)=>b[0].localeCompare(a[0])).map(([ds,reps])=>{
     const dt=getDayType(ds);const sch=dt?SCHEDULE[dt]:null;
     const hrs=reps.reduce((s,r)=>s+(parseFloat(r.Hours)||0),0);
@@ -781,7 +843,7 @@ async function loadHistory() {
       <div class="sum-hdr">
         <div style="display:flex;align-items:center;gap:8px">
           ${sch?`<span class="day-badge ${sch.cls}">${sch.label}</span>`:""}
-          <span style="font-size:14px;font-weight:600">${ds}</span>
+          <span style="font-size:14px;font-weight:600">${fmtDate(ds)}</span>
           <span style="font-size:12px;color:var(--tx3)">Week ${getWeekNum(ds)||"?"}</span>
         </div>
         ${hrs?`<span style="font-size:13px;font-weight:600;color:var(--g)">${hrs.toFixed(1)} hrs</span>`:""}
@@ -916,13 +978,17 @@ async function loadAttendance() {
   if(!el)return;
   if(!total){el.innerHTML='<div class="empty-state">No attendance records yet.</div>';return;}
   const byDay={};
-  (res.data||[]).forEach(r=>{if(!byDay[r.Date])byDay[r.Date]=[];byDay[r.Date].push(r);});
+  (res.data||[]).forEach(r=>{
+    const cleanDate = fmtDateShort(r.Date);
+    if(!byDay[cleanDate]) byDay[cleanDate]=[];
+    byDay[cleanDate].push({...r, _cleanDate: cleanDate});
+  });
   el.innerHTML=Object.entries(byDay).sort((a,b)=>b[0].localeCompare(a[0])).map(([ds,evs])=>{
     const dt=getDayType(ds);const sch=dt?SCHEDULE[dt]:null;
     return `<div style="margin-bottom:14px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
         ${sch?`<span class="day-badge ${sch.cls}">${sch.label}</span>`:""}
-        <span style="font-size:13px;font-weight:600">${ds}</span>
+        <span style="font-size:13px;font-weight:600">${fmtDate(ds)}</span>
         <span style="font-size:12px;color:var(--tx3)">Week ${getWeekNum(ds)||"?"}</span>
       </div>
       ${evs.map(e=>{
@@ -934,7 +1000,7 @@ async function loadAttendance() {
             ${e.IsLate==="YES"?'<span class="late-tag">Late arrival</span>':""}
           </div>
           <div style="display:flex;align-items:center;gap:12px">
-            <span class="att-time">In: <strong>${e.ClockIn}</strong> | Out: <strong>${e.ClockOut||"Active"}</strong></span>
+            <span class="att-time">In: <strong>${fmtTime(e.ClockIn)}</strong> &nbsp;|&nbsp; Out: <strong>${e.ClockOut ? fmtTime(e.ClockOut) : "Active"}</strong></span>
             <span class="att-hrs">${parseFloat(e.Hours||0).toFixed(1)} hrs</span>
           </div>
         </div>`;
@@ -956,7 +1022,8 @@ async function loadMgrReports() {
   }
   if(el)el.innerHTML=res.data.map(r=>{
     const rd   =ROLES[r.Role]||{label:r.Role,badge:"b-vd",color:"#1B5AAB"};
-    const dt   =getDayType(r.Date);const sch=dt?SCHEDULE[dt]:null;
+    const cleanDate = fmtDateShort(r.Date);
+    const dt   =getDayType(cleanDate);const sch=dt?SCHEDULE[dt]:null;
     const note =mgrNotes[r.ID]||"";
     return `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;gap:8px;flex-wrap:wrap">
@@ -965,7 +1032,7 @@ async function loadMgrReports() {
           <span style="font-size:14px;font-weight:600">${esc(r.Name)}</span>
           ${sch?`<span class="day-badge ${sch.cls}">${sch.label}</span>`:""}
         </div>
-        <span style="font-size:12px;color:var(--tx2)">${r.Date} · Wk ${r.WeekNum||"?"} · ${r.Hours}h</span>
+        <span style="font-size:12px;color:var(--tx2)">${fmtDate(r.Date)} &nbsp;&middot;&nbsp; Wk ${r.WeekNum||"?"} &nbsp;&middot;&nbsp; ${r.Hours}h</span>
       </div>
       ${r.Activities?`<div style="font-size:13px;margin-bottom:6px"><span style="color:var(--tx2)">Activities: </span>${esc(r.Activities.substring(0,200))}${r.Activities.length>200?"...":""}</div>`:""}
       ${r.Challenges?`<div style="font-size:13px;margin-bottom:6px"><span style="color:var(--tx2)">Challenges: </span>${esc(r.Challenges.substring(0,150))}${r.Challenges.length>150?"...":""}</div>`:""}
