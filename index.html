@@ -50,7 +50,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--tx);min-height:100
 .cbtn:disabled{opacity:0.4;cursor:not-allowed}
 .cbtn-in:not(:disabled):hover{background:var(--g2)}.cbtn-out:not(:disabled):hover{background:#D9B30A;color:#1a1a1a}
 .day-badge{font-size:11px;padding:3px 10px;border-radius:12px;font-weight:600;display:inline-block}
-.d-mon{background:var(--orl);color:#7a6206}.d-tue{background:var(--bll);color:var(--bl)}.d-wed{background:var(--pul);color:var(--pu)}.d-thu{background:var(--gl);color:var(--g)}.d-sat{background:var(--orl);color:#7a6206}
+.d-mon{background:var(--orl);color:#7a6206}.d-tue{background:var(--bll);color:var(--bl)}.d-wed{background:var(--pul);color:var(--pu)}.d-thu{background:var(--gl);color:var(--g)}.d-sat{background:var(--orl);color:#7a6206}.d-off{background:#EBEBEB;color:#666666;border:1px dashed #999}
 .role-badge{font-size:11px;padding:3px 10px;border-radius:12px;font-weight:600;display:inline-block}
 .b-vd{background:var(--bll);color:var(--bl)}.b-cpd{background:var(--pul);color:var(--pu)}.b-smm{background:var(--orl);color:#7a6206}.b-wc{background:var(--gl);color:var(--g)}
 .late-tag{font-size:11px;padding:2px 7px;border-radius:8px;background:var(--orl);color:var(--or);display:inline-block}
@@ -240,6 +240,7 @@ input[type=range]{accent-color:var(--g);cursor:pointer}
           <option value="Wednesday: Food Bank Service">Wednesday: Food Bank Service</option>
           <option value="Thursday: Community Engagement">Thursday: Community Engagement</option>
           <option value="Saturday: Food Bank">Saturday: Food Bank</option>
+          <option value="Non-Working Day: Special Shift">Non-Working Day: Special Shift</option>
         </select>
       </div>
     </div>
@@ -423,7 +424,8 @@ const SCHEDULE = {
   Tue:{label:"Tuesday",start:"10:00",end:"17:00",cls:"d-tue"},
   Wed:{label:"Wednesday",start:"10:30",end:"18:30",cls:"d-wed"},
   Thu:{label:"Thursday",start:"10:00",end:"17:00",cls:"d-thu"},
-  Sat:{label:"Saturday",start:"10:30",end:"18:30",cls:"d-sat"}
+  Sat:{label:"Saturday",start:"10:30",end:"18:30",cls:"d-sat"},
+  Off:{label:"Non-Working Day",start:null,end:null,cls:"d-off"}
 };
 
 // ── STATE ─────────────────────────────────────────────────
@@ -484,7 +486,11 @@ function getDayType(ds) {
   if (!ds) return null;
   if (ds === "2026-06-29") return "Mon"; // special orientation day
   const dow = new Date(ds+"T12:00:00").getDay();
-  return dow===2?"Tue":dow===3?"Wed":dow===4?"Thu":dow===6?"Sat":null;
+  if (dow===2) return "Tue";
+  if (dow===3) return "Wed";
+  if (dow===4) return "Thu";
+  if (dow===6) return "Sat";
+  return "Off"; // Mon/Fri/Sun within program period
 }
 function getWeekNum(ds) {
   if (!ds) return null;
@@ -572,7 +578,11 @@ function updateDayInfo(inputId, infoId) {
   if (!dt){el.style.display="none";return;}
   const sch=SCHEDULE[dt];
   el.style.display="block";
-  el.innerHTML=`<span class="day-badge ${sch.cls}" style="margin-right:8px">${sch.label}</span>Scheduled <strong>${to12hr(sch.start)}</strong> &ndash; <strong>${to12hr(sch.end)}</strong>`;
+  if (dt === "Off") {
+    el.innerHTML=`<span class="day-badge d-off" style="margin-right:8px">Non-Working Day</span>You can still record your time if you came in for special work.`;
+  } else {
+    el.innerHTML=`<span class="day-badge ${sch.cls}" style="margin-right:8px">${sch.label}</span>Scheduled <strong>${to12hr(sch.start)}</strong> &ndash; <strong>${to12hr(sch.end)}</strong>`;
+  }
 }
 
 // ── VIEW SWITCHING ────────────────────────────────────────
@@ -611,6 +621,7 @@ function autoFillShiftType(dateInputId) {
   else if (dt === "Wed")             sel.value = "Wednesday: Food Bank Service";
   else if (dt === "Thu")             sel.value = "Thursday: Community Engagement";
   else if (dt === "Sat")             sel.value = "Saturday: Food Bank";
+  else if (dt === "Off")             sel.value = "Non-Working Day: Special Shift";
 }
 
 function autofillDailyRole() {
@@ -698,14 +709,17 @@ async function clockIn() {
   const ds  =document.getElementById("c-date").value;
   if (!name||!role||!ds){alert("Please enter your name, select your role, and pick today's date.");return;}
   const dt=getDayType(ds);
-  if (!dt){alert("The selected date is not a working day (Tue/Wed/Thu/Sat).");return;}
+  // All days within Jun 29-Aug 29 are now permitted; Off = non-working day, still logged
   const t   =nowTime();
-  const sch =SCHEDULE[dt];
-  // Check lateness using ET numeric comparison
+  const sch = SCHEDULE[dt] || SCHEDULE["Off"];
+  // Off days have no scheduled start — never late
   const nowET = new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"America/Toronto"});
-  const [sh,sm] = sch.start.split(":").map(Number);
-  const [nh,nm] = nowET.split(":").map(Number);
-  const late = (nh*60+nm) > (sh*60+sm+30);
+  let late = false;
+  if (sch.start) {
+    const [sh,sm] = sch.start.split(":").map(Number);
+    const [nh,nm] = nowET.split(":").map(Number);
+    late = (nh*60+nm) > (sh*60+sm+30);
+  }
   clockInData={name,role,ds,dt,time:t,isLate:late,wk:getWeekNum(ds)};
   clockedIn=true;
   document.getElementById("btn-in").disabled=true;
@@ -1181,7 +1195,7 @@ setInterval(()=>{
 
     const badge = document.getElementById("clock-badge");
     badge.className   = "clock-status s-in";
-    badge.textContent = "Clocked in at " + data.time + (data.isLate ? " (late)" : "") + " — tap Clock Out when done";
+    badge.textContent = "Clocked in at " + data.time + (data.isLate ? " (late)" : "") + (data.dt==="Off" ? " \u2014 Non-working day" : "") + " \u2014 tap Clock Out when done";
 
     document.getElementById("clock-msg").textContent =
       "Welcome back, " + data.name + "! You clocked in at " + data.time + ". Tap Clock Out when your shift ends.";
