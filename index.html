@@ -722,10 +722,18 @@ async function clockIn() {
     weekNum:getWeekNum(ds), time:t, isLate:late, submittedAt:etStamp
   });
   if (res.ok) { currentClockId=res.id; setSyncStatus("ok"); }
-  else { setSyncStatus(isConnected()?"error":"error"); }
+  else { setSyncStatus("error"); }
   // Store locally too
+  const clockId = res.id || Date.now().toString();
+  currentClockId = clockId;
   if (!localHistory[ds]) localHistory[ds]=[];
-  localHistory[ds].push({...clockInData, id:res.id||Date.now().toString()});
+  localHistory[ds].push({...clockInData, id:clockId});
+  // Persist to localStorage so Clock Out survives app close/reopen
+  try {
+    localStorage.setItem("fc_csj_clockin", JSON.stringify({
+      ...clockInData, id:clockId, savedAt:new Date().toISOString()
+    }));
+  } catch(e) {}
   renderTodayLog();
 }
 
@@ -758,6 +766,8 @@ async function clockOut() {
   updateDayInfo("d-date","d-day-info");
   autoFillShiftType("d-date"); // auto-select shift type based on day
   clockedIn=false; clockInData=null; currentClockId=null;
+  // Clear persisted clock-in state
+  try { localStorage.removeItem("fc_csj_clockin"); } catch(e) {}
   renderTodayLog();
 }
 
@@ -1136,6 +1146,59 @@ setInterval(()=>{
 },1000);
 
 // ── INIT ──────────────────────────────────────────────────
+// Restore clock-in state from localStorage if student closed and reopened the app
+(function restoreClockIn() {
+  try {
+    const saved = localStorage.getItem("fc_csj_clockin");
+    if (!saved) return;
+    const data = JSON.parse(saved);
+    if (!data || !data.ds || !data.name || !data.time) return;
+
+    // Check it is still today (ET)
+    const todayET = new Date().toLocaleDateString("en-CA",{timeZone:"America/Toronto"});
+    if (data.ds !== todayET) {
+      // Stale — from a previous day. Clear it silently.
+      localStorage.removeItem("fc_csj_clockin");
+      return;
+    }
+
+    // Restore state
+    clockInData     = data;
+    clockedIn       = true;
+    currentClockId  = data.id || null;
+
+    // Restore UI
+    const nameEl = document.getElementById("c-name");
+    const roleEl = document.getElementById("c-role");
+    const dateEl = document.getElementById("c-date");
+    if (nameEl) nameEl.value = data.name;
+    if (roleEl) roleEl.value = data.role;
+    if (dateEl) dateEl.value = data.ds;
+    updateDayInfo("c-date","c-day-info");
+
+    document.getElementById("btn-in").disabled  = true;
+    document.getElementById("btn-out").disabled = false;
+
+    const badge = document.getElementById("clock-badge");
+    badge.className   = "clock-status s-in";
+    badge.textContent = "Clocked in at " + data.time + (data.isLate ? " (late)" : "") + " — tap Clock Out when done";
+
+    document.getElementById("clock-msg").textContent =
+      "Welcome back, " + data.name + "! You clocked in at " + data.time + ". Tap Clock Out when your shift ends.";
+
+    // Add to today's local history log so it shows in the log card
+    if (!localHistory[data.ds]) localHistory[data.ds] = [];
+    const alreadyLogged = localHistory[data.ds].some(e => e.id === data.id);
+    if (!alreadyLogged) localHistory[data.ds].push({...data, hours:0});
+    renderTodayLog();
+
+    console.log("CSJ App: Restored clock-in state for", data.name, "at", data.time);
+  } catch(e) {
+    // If anything goes wrong with localStorage, just start fresh
+    try { localStorage.removeItem("fc_csj_clockin"); } catch(e2) {}
+  }
+})();
+
 checkConnection();
 renderAlerts();
 </script>
