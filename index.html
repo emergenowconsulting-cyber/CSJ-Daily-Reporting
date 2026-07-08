@@ -499,8 +499,20 @@ function getWeekNum(ds) {
   return (diff>=0&&diff<9)?diff+1:null;
 }
 function timeToSecs(t) {
-  const p=t.split(":").map(Number);
-  return p[0]*3600+p[1]*60+(p[2]||0);
+  if (!t) return 0;
+  const s = String(t).trim();
+  // Handle 12-hour format e.g. "10:02:35 AM" or "2:15:00 PM"
+  const ampm = /\s*(AM|PM)$/i.exec(s);
+  const clean = s.replace(/\s*(AM|PM)$/i, "").trim();
+  const p = clean.split(":").map(Number);
+  let h = p[0] || 0;
+  const m = p[1] || 0;
+  const sec = p[2] || 0;
+  if (ampm) {
+    if (ampm[1].toUpperCase() === "PM" && h !== 12) h += 12;
+    if (ampm[1].toUpperCase() === "AM" && h === 12) h = 0;
+  }
+  return h*3600 + m*60 + sec;
 }
 function nowTime() {
   return new Date().toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",second:"2-digit",hour12:true,timeZone:"America/Toronto"});
@@ -720,7 +732,7 @@ async function clockIn() {
     const [nh,nm] = nowET.split(":").map(Number);
     late = (nh*60+nm) > (sh*60+sm+30);
   }
-  clockInData={name,role,ds,dt,time:t,isLate:late,wk:getWeekNum(ds)};
+  clockInData={name,role,ds,dt,time:t,isLate:late,wk:getWeekNum(ds),tsMs:Date.now()};
   clockedIn=true;
   document.getElementById("btn-in").disabled=true;
   document.getElementById("btn-out").disabled=false;
@@ -745,7 +757,8 @@ async function clockIn() {
   // Persist to localStorage so Clock Out survives app close/reopen
   try {
     localStorage.setItem("fc_csj_clockin", JSON.stringify({
-      ...clockInData, id:clockId, savedAt:new Date().toISOString()
+      ...clockInData, id:clockId, savedAt:new Date().toISOString(),
+      tsMs: clockInData.tsMs || Date.now()
     }));
   } catch(e) {}
   renderTodayLog();
@@ -753,9 +766,11 @@ async function clockIn() {
 
 async function clockOut() {
   if (!clockInData) return;
-  const t    =nowTime();
-  const secs =timeToSecs(t)-timeToSecs(clockInData.time);
-  const hrs  =Math.max(0,secs/3600);
+  const t   = nowTime();
+  // Use millisecond timestamps for accurate hours — avoids 12-hr AM/PM parsing issues
+  const nowMs  = Date.now();
+  const inMs   = clockInData.tsMs || nowMs; // fallback if tsMs not stored
+  const hrs    = Math.max(0, (nowMs - inMs) / 3600000);
   document.getElementById("btn-in").disabled=false;
   document.getElementById("btn-out").disabled=true;
   const badge=document.getElementById("clock-badge");
