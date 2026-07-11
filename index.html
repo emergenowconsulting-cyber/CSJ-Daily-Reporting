@@ -176,7 +176,7 @@ input[type=range]{accent-color:var(--g);cursor:pointer}
       </div>
       <div class="field">
         <label>Today's date</label>
-        <input type="date" id="c-date" min="2026-06-29" max="2026-08-29" onchange="updateDayInfo('c-date','c-day-info')">
+        <input type="date" id="c-date" min="2026-06-29" max="2026-08-29" onchange="updateDayInfo('c-date','c-day-info');checkActiveClockin()">
         <div class="day-info" id="c-day-info"></div>
       </div>
     </div>
@@ -403,7 +403,7 @@ input[type=range]{accent-color:var(--g);cursor:pointer}
 "use strict";
 
 // ── CONFIGURATION - ADD YOUR APPS SCRIPT URL HERE ─────────
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycby5zG-5sJuVnXb4xN3xGZLYNbyjaX-vDq3eo4wFZyBP9irK63_yrO5IwqPg8xpzhGr0/exec"; // Paste your deployed Apps Script URL here
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxpseltpgU1REaY_gCalEC80mvyxeTFvVJI5qbLocuPP8wTkAO2QJ7AXzSIUVnKx7ke/exec"; // Paste your deployed Apps Script URL here
 // Example: "https://script.google.com/macros/s/AKfy.../exec"
 
 // ── CONSTANTS ─────────────────────────────────────────────
@@ -437,17 +437,11 @@ let mgrNotes={};
 // ── API HELPERS ───────────────────────────────────────────
 function isConnected() { return SCRIPT_URL && SCRIPT_URL.length > 10; }
 
+// NOTE: All operations use GET params — Apps Script POST redirects strip the body
+// This is the correct approach for Apps Script web apps
 async function apiPost(data) {
-  if (!isConnected()) return {ok:false, error:"not_connected"};
-  try {
-    const res = await fetch(SCRIPT_URL, {
-      method:"POST",
-      body: JSON.stringify(data)
-    });
-    return await res.json();
-  } catch(e) {
-    return {ok:false, error:e.toString()};
-  }
+  // Route all through GET to avoid Apps Script POST redirect issue
+  return apiGet(data);
 }
 
 async function apiGet(params) {
@@ -477,7 +471,7 @@ async function checkConnection() {
     return;
   }
   setSyncStatus("pending");
-  const res = await apiPost({action:"verifyPassword", password:"__ping__"});
+  const res = await apiGet({action:"verifyPassword", password:"__ping__"});
   setSyncStatus(res.error ? "error" : "ok");
 }
 
@@ -598,6 +592,116 @@ function updateDayInfo(inputId, infoId) {
 }
 
 // ── VIEW SWITCHING ────────────────────────────────────────
+// ── ACTIVE CLOCK-IN RECOVERY FROM SHEETS ─────────────────────────────────────
+// Called whenever name or date changes on Clock In tab
+// Queries Google Sheets directly for an open session — more reliable than localStorage
+async function checkActiveClockin() {
+  const name = document.getElementById("c-name").value;
+  const ds   = document.getElementById("c-date").value;
+  if (!name || !ds) return;
+  if (clockedIn) return; // already have an active session
+
+  // First try localStorage restore (instant, no network)
+  try {
+    const saved = localStorage.getItem("fc_csj_clockin");
+    if (saved) {
+      const data = JSON.parse(saved);
+      if (data && data.name === name && data.ds === ds) {
+        restoreSessionFromData(data);
+        document.getElementById("clock-msg").textContent =
+          "Session restored from this device. Tap Clock Out when done.";
+        return;
+      }
+    }
+  } catch(e) {}
+
+  // Fall back to Sheets lookup (network call — catches cases where localStorage cleared)
+  if (!isConnected()) return;
+  setSyncStatus("pending");
+  try {
+    const res = await apiGet({action:"getActiveClockin", name, date:ds});
+    setSyncStatus("ok");
+    if (res.ok && res.found && res.record) {
+      const rec = res.record;
+      const recoveredData = {
+        name:    rec.Name,
+        role:    rec.Role,
+        ds:      rec.Date,
+        dt:      rec.DayType || getDayType(rec.Date),
+        time:    fmtTime(rec.ClockIn),
+        isLate:  rec.IsLate === "YES",
+        wk:      rec.WeekNum,
+        id:      rec.ID,
+        // Reconstruct tsMs from stored time string for hours calculation
+        tsMs:    timeStringToTodayMs(rec.ClockIn, rec.Date)
+      };
+      // Save to localStorage so future restores are instant
+      try { localStorage.setItem("fc_csj_clockin", JSON.stringify(recoveredData)); } catch(e) {}
+      restoreSessionFromData(recoveredData);
+      document.getElementById("clock-msg").textContent =
+        "Session recovered from Google Sheets. Tap Clock Out when done, " + rec.Name.split(" ")[0] + "!";
+    }
+  } catch(e) {
+    setSyncStatus("error");
+  }
+}
+
+// Convert a time string like "10:02:35 AM" + date "2026-07-08" to milliseconds
+// Used when recovering from Sheets where original tsMs is not stored
+function timeStringToTodayMs(timeStr, dateStr) {
+  try {
+    const secs  = timeToSecs(String(timeStr || ""));
+    if (!secs && secs !== 0) return Date.now(); // fallback
+    const [y,m,d] = dateStr.split("-").map(Number);
+    // Build a midnight ET timestamp then add seconds
+    // We use noon to avoid DST edge cases, then subtract 12 hours
+    const noonLocal = new Date(y, m-1, d, 12, 0, 0, 0).getTime();
+    const noonET    = new Date(new Date(y,m-1,d,12,0,0,0)
+                      .toLocaleString("en-US",{timeZone:"America/Toronto"})).getTime();
+    const offsetMs  = noonLocal - noonET; // device offset vs ET
+    const midnightET = new Date(y,m-1,d,0,0,0,0).getTime() + offsetMs;
+    return midnightET + secs * 1000;
+  } catch(e) {
+    return Date.now();
+  }
+}
+
+// Restores clock-in UI state from a data object (localStorage or Sheets record)
+function restoreSessionFromData(data) {
+  clockInData    = data;
+  clockedIn      = true;
+  currentClockId = data.id || data.ID || null;
+
+  // Update dropdowns
+  const nameEl = document.getElementById("c-name");
+  const roleEl = document.getElementById("c-role");
+  const dateEl = document.getElementById("c-date");
+  if (nameEl) nameEl.value = data.name;
+  if (roleEl) roleEl.value = data.role;
+  if (dateEl) dateEl.value = data.ds;
+  updateDayInfo("c-date","c-day-info");
+
+  // Update buttons
+  document.getElementById("btn-in").disabled  = true;
+  document.getElementById("btn-out").disabled = false;
+
+  // Update status badge
+  const badge = document.getElementById("clock-badge");
+  badge.className   = "clock-status s-in";
+  badge.textContent = "Clocked in at " + data.time
+    + (data.isLate ? " (late)" : "")
+    + (data.dt === "Off" ? " — Non-working day" : "")
+    + " — tap Clock Out when done";
+
+  // Update today's log
+  if (data.ds) {
+    if (!localHistory[data.ds]) localHistory[data.ds] = [];
+    const alreadyLogged = localHistory[data.ds].some(e => (e.id||e.ID) === (data.id||data.ID));
+    if (!alreadyLogged) localHistory[data.ds].push({...data, hours:0});
+  }
+  renderTodayLog();
+}
+
 // Name → Role mapping
 const NAME_ROLE = {
   "Esli Affran":   "smm",
@@ -622,6 +726,8 @@ function autoFillRole() {
     roleEl.value = "";
   }
   updateDayInfo("c-date","c-day-info");
+  // Attempt to recover active clock-in session for this student
+  checkActiveClockin();
 }
 
 function autoFillShiftType(dateInputId) {
@@ -667,7 +773,7 @@ async function checkPw() {
   if (!pw) return;
   let valid = false;
   if (isConnected()) {
-    const res = await apiPost({action:"verifyPassword", password:pw});
+    const res = await apiGet({action:"verifyPassword", password:pw});
     valid = res.valid;
   } else {
     // Offline fallback — local check
@@ -743,9 +849,9 @@ async function clockIn() {
   // Save to sheet
   setSyncStatus("pending");
   const etStamp = new Date().toLocaleString("en-US",{timeZone:"America/Toronto",hour:"numeric",minute:"2-digit",second:"2-digit",hour12:true,month:"short",day:"numeric",year:"numeric"});
-  const res = await apiPost({
+  const res = await apiGet({
     action:"clockIn", name, role, date:ds, dayType:dt,
-    weekNum:getWeekNum(ds), time:t, isLate:late, submittedAt:etStamp
+    weekNum:getWeekNum(ds), time:t, isLate:String(late), submittedAt:etStamp
   });
   if (res.ok) { currentClockId=res.id; setSyncStatus("ok"); }
   else { setSyncStatus("error"); }
@@ -779,12 +885,12 @@ async function clockOut() {
   document.getElementById("clock-msg").textContent="Total: "+hrs.toFixed(1)+" hours. See you next shift!";
   // Save to sheet
   setSyncStatus("pending");
-  const res = await apiPost({
-    action:"clockOut", id:currentClockId,
+  const res = await apiGet({
+    action:"clockOut", id:currentClockId||"",
     name:clockInData.name, role:clockInData.role,
-    date:clockInData.ds, dayType:clockInData.dt,
-    weekNum:clockInData.wk, clockIn:clockInData.time,
-    clockOut:t, hours:parseFloat(hrs.toFixed(2)), isLate:clockInData.isLate
+    date:clockInData.ds, dayType:clockInData.dt||"",
+    weekNum:clockInData.wk||"", clockIn:clockInData.time,
+    clockOut:t, hours:parseFloat(hrs.toFixed(2)), isLate:String(clockInData.isLate||false)
   });
   setSyncStatus(res.ok?"ok":"error");
   // Auto-fill daily report from clock data
@@ -841,10 +947,10 @@ async function submitDaily() {
     foodbank:document.getElementById("d-foodbank").value,
     tomorrow:document.getElementById("d-tomorrow").value,
     win:document.getElementById("d-win").value,
-    skills
+    skills:skills.join(", ") // join for GET param compatibility
   };
   setSyncStatus("pending");
-  const res=await apiPost(data);
+  const res=await apiGet(data);
   setSyncStatus(res.ok?"ok":"error");
   const ok=document.getElementById("daily-ok");
   ok.style.display="block";
@@ -930,7 +1036,7 @@ async function upProg(role,item,val,key) {
   const pp=document.getElementById("pp_"+key);
   if(pf)pf.style.width=val+"%";
   if(pp)pp.textContent=val+"%";
-  await apiPost({action:"updateProgress",role,item,percentage:parseInt(val)});
+  await apiGet({action:"updateProgress",role,item,percentage:parseInt(val)});
 }
 
 // ── LOAD: ANALYTICS ──────────────────────────────────────
@@ -1175,58 +1281,8 @@ setInterval(()=>{
 },1000);
 
 // ── INIT ──────────────────────────────────────────────────
-// Restore clock-in state from localStorage if student closed and reopened the app
-(function restoreClockIn() {
-  try {
-    const saved = localStorage.getItem("fc_csj_clockin");
-    if (!saved) return;
-    const data = JSON.parse(saved);
-    if (!data || !data.ds || !data.name || !data.time) return;
-
-    // Check it is still today (ET)
-    const todayET = new Date().toLocaleDateString("en-CA",{timeZone:"America/Toronto"});
-    if (data.ds !== todayET) {
-      // Stale — from a previous day. Clear it silently.
-      localStorage.removeItem("fc_csj_clockin");
-      return;
-    }
-
-    // Restore state
-    clockInData     = data;
-    clockedIn       = true;
-    currentClockId  = data.id || null;
-
-    // Restore UI
-    const nameEl = document.getElementById("c-name");
-    const roleEl = document.getElementById("c-role");
-    const dateEl = document.getElementById("c-date");
-    if (nameEl) nameEl.value = data.name;
-    if (roleEl) roleEl.value = data.role;
-    if (dateEl) dateEl.value = data.ds;
-    updateDayInfo("c-date","c-day-info");
-
-    document.getElementById("btn-in").disabled  = true;
-    document.getElementById("btn-out").disabled = false;
-
-    const badge = document.getElementById("clock-badge");
-    badge.className   = "clock-status s-in";
-    badge.textContent = "Clocked in at " + data.time + (data.isLate ? " (late)" : "") + (data.dt==="Off" ? " \u2014 Non-working day" : "") + " \u2014 tap Clock Out when done";
-
-    document.getElementById("clock-msg").textContent =
-      "Welcome back, " + data.name + "! You clocked in at " + data.time + ". Tap Clock Out when your shift ends.";
-
-    // Add to today's local history log so it shows in the log card
-    if (!localHistory[data.ds]) localHistory[data.ds] = [];
-    const alreadyLogged = localHistory[data.ds].some(e => e.id === data.id);
-    if (!alreadyLogged) localHistory[data.ds].push({...data, hours:0});
-    renderTodayLog();
-
-    console.log("CSJ App: Restored clock-in state for", data.name, "at", data.time);
-  } catch(e) {
-    // If anything goes wrong with localStorage, just start fresh
-    try { localStorage.removeItem("fc_csj_clockin"); } catch(e2) {}
-  }
-})();
+// Session recovery now handled by checkActiveClockin() which is called
+// when a student selects their name — checks both localStorage AND Google Sheets
 
 checkConnection();
 renderAlerts();
